@@ -36,15 +36,35 @@ class Turno(TypedDict):
     content: str
 
 
-def build_contexto_vaga(vaga_titulo: str, vaga_descricao: str | None, estilo_entrevistador: str | None) -> str:
+def build_contexto_vaga(
+    vaga_titulo: str,
+    vaga_descricao: str | None,
+    estilo_entrevistador: str | None,
+    kb_objetivo: str | None = None,
+    perguntas_sugeridas: str | None = None,
+    kb_usuario: str | None = None,
+) -> str:
+    """
+    `kb_objetivo`/`perguntas_sugeridas`/`kb_usuario` vêm do avaliador da tentativa
+    anterior deste mesmo Objetivo (fase-3-criterios.md) — o front busca no Kotlin e
+    repassa na mensagem `start` do WebSocket. Ausentes na primeira tentativa de um
+    Objetivo novo, sem problema (entrevista roda só com a vaga).
+    """
     estilo = estilo_entrevistador or _ESTILO_PADRAO
     estilo_descricao = _DESCRICAO_POR_ESTILO.get(estilo, _DESCRICAO_POR_ESTILO[_ESTILO_PADRAO])
     descricao = vaga_descricao or "(não informada)"
-    return (
+    contexto = (
         f"Vaga: {vaga_titulo}\n"
         f"Descrição da vaga: {descricao}\n"
         f"Estilo da entrevista: {estilo} — {estilo_descricao}"
     )
+    if kb_objetivo:
+        contexto += f"\n\nO que já se sabe sobre a pessoa nesta vaga/track (tentativas anteriores):\n{kb_objetivo}"
+    if perguntas_sugeridas:
+        contexto += f"\n\nSugestão do que explorar nesta entrevista:\n{perguntas_sugeridas}"
+    if kb_usuario:
+        contexto += f"\n\nPerfil comportamental conhecido da pessoa (de outras vagas também):\n{kb_usuario}"
+    return contexto
 
 
 class InterviewerState(TypedDict):
