@@ -10,7 +10,7 @@ import os
 
 APP_VERSION = "0.1.0"
 
-_REQUIRED: list[str] = []
+_REQUIRED: list[str] = ["OPENAI_API_KEY", "VEREDITO_SERVICE_TOKEN"]
 
 
 class ConfigError(RuntimeError):
@@ -29,6 +29,8 @@ class Settings:
         for name in _REQUIRED:
             _require(name)
         self.env = os.environ.get("ENV", "local")
+        self.openai_api_key = os.environ["OPENAI_API_KEY"]
+        self.veredito_service_token = os.environ["VEREDITO_SERVICE_TOKEN"]
 
 
 def load_settings() -> Settings:
