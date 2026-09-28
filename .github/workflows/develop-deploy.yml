@@ -1,0 +1,214 @@
+name: Develop → Deploy HML → PR to main
+
+# Fluxo: push em develop (merge de PR aprovado) roda os testes; se passar, determina a
+# versão semântica (X.Y.Z) e builda/publica a imagem só se essa versão ainda não
+# existir no GitHub Container Registry (ghcr.io — privado e gratuito, sem o limite de
+# 1 repo privado do Docker Hub free); faz deploy via SSH na MESMA EC2 de HML do backend
+# (container novo, rede Docker `ensaia-hml-net` compartilhada, sem acoplar dados/processo
+# com os outros containers — limites de memória/CPU explícitos); depois abre (ou
+# reaproveita) um PR de develop pra main.
+
+on:
+  push:
+    branches:
+      - develop
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  build-test:
+    uses: ./.github/workflows/build-test.yml
+
+  determine-version:
+    needs: build-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      image_exists: ${{ steps.check.outputs.exists }}
+    steps:
+      - name: Checkout (histórico completo, precisa das tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determinar versão semântica (reaproveita se o commit já tem uma)
+        id: version
+        run: |
+          set -euo pipefail
+
+          EXISTING_TAG=$(git tag --points-at HEAD | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)
+
+          if [ -n "$EXISTING_TAG" ]; then
+            VERSION="$EXISTING_TAG"
+            echo "Commit já tem versão $VERSION (retry), reaproveitando."
+          else
+            LATEST_TAG=$(git tag -l '[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1 || true)
+            if [ -z "$LATEST_TAG" ]; then
+              VERSION="0.1.0"
+            else
+              IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST_TAG"
+              VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+            fi
+            echo "Nova versão: $VERSION (anterior: ${LATEST_TAG:-nenhuma})"
+
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag "$VERSION"
+            git push origin "$VERSION"
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "## Versão: \`$VERSION\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Login no GHCR (só pra checar existência da imagem)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Checar se a imagem dessa versão já existe no GHCR
+        id: check
+        run: |
+          IMAGE="ghcr.io/${{ github.repository_owner }}/ensaia-ia:${{ steps.version.outputs.version }}"
+          if docker manifest inspect "$IMAGE" > /dev/null 2>&1; then
+            echo "Imagem $IMAGE já existe — não precisa buildar de novo."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Imagem $IMAGE ainda não existe — vai buildar."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  deploy-hml:
+    needs: determine-version
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      packages: write
+    env:
+      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/ensaia-ia
+      VERSION: ${{ needs.determine-version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login no GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build e push da imagem (só se essa versão ainda não existir)
+        if: needs.determine-version.outputs.image_exists != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE_NAME }}:latest,${{ env.IMAGE_NAME }}:${{ env.VERSION }}
+
+      - name: Pular build (imagem já existe — provável retry)
+        if: needs.determine-version.outputs.image_exists == 'true'
+        run: echo "Imagem ${{ env.IMAGE_NAME }}:${{ env.VERSION }} já existe no GHCR — reaproveitando, sem rebuild."
+
+      - name: Deploy via SSH na EC2 de HML (com health-check e logs em caso de erro)
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          command_timeout: 5m
+          script: |
+            set -euo pipefail
+            IMAGE="${{ env.IMAGE_NAME }}:${{ env.VERSION }}"
+
+            echo "== Login no GHCR (repositório privado) =="
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+            echo "== Pull da imagem =="
+            docker pull "$IMAGE"
+
+            echo "== Parando container anterior (se existir) =="
+            docker stop ensaia-ia 2>/dev/null && echo "Container anterior parado." || echo "Nenhum container anterior rodando."
+            docker rm ensaia-ia 2>/dev/null || true
+
+            echo "== Subindo novo container (limites de memória/CPU explícitos — mesma EC2 do backend) =="
+            docker run -d \
+              --name ensaia-ia \
+              --restart=always \
+              --network ensaia-hml-net \
+              --env-file /home/ubuntu/ensaia/.env-ia.hml \
+              --memory=256m \
+              --cpus=0.5 \
+              -p 8081:8081 \
+              "$IMAGE"
+
+            echo "== Aguardando health check (até 60s) =="
+            OK=0
+            for i in $(seq 1 30); do
+              if curl -fs http://localhost:8081/health > /tmp/health-check.json 2>/dev/null; then
+                echo "Health check OK na tentativa $i:"
+                cat /tmp/health-check.json
+                OK=1
+                break
+              fi
+              sleep 2
+            done
+
+            if [ "$OK" -ne 1 ]; then
+              echo "❌ ERRO: health check não respondeu 200 depois de 60s."
+              echo "---- docker ps ----"
+              docker ps -a --filter name=ensaia-ia
+              echo "---- docker logs ensaia-ia (últimas 100 linhas) ----"
+              docker logs ensaia-ia --tail 100 || echo "(não foi possível ler logs — container pode nem ter iniciado)"
+              exit 1
+            fi
+
+            echo "== docker ps (confirmação final) =="
+            docker ps --filter name=ensaia-ia
+
+      - name: Resumo do deploy
+        if: always()
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "## ✅ Deploy em HML concluído" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## ❌ Deploy em HML falhou" >> "$GITHUB_STEP_SUMMARY"
+            echo "Ver o log do step 'Deploy via SSH' acima — ele já imprime \`docker logs\` do container em caso de falha no health-check." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "Imagem: \`${{ env.IMAGE_NAME }}:${{ env.VERSION }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  open-pr-to-main:
+    needs: deploy-hml
+    runs-on: ubuntu-latest
+    steps:
+      - name: Abrir PR pra main (ou confirmar que já existe) — sem merge automático
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+
+          EXISTING_URL=$(gh pr list --repo "$REPO" --head develop --base main --json url -q '.[0].url' || true)
+
+          if [ -n "$EXISTING_URL" ]; then
+            echo "PR já existe: $EXISTING_URL"
+            echo "## PR develop → main já existente" >> "$GITHUB_STEP_SUMMARY"
+            echo "$EXISTING_URL" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Nenhum PR encontrado develop -> main. Criando..."
+            NEW_URL=$(gh pr create \
+              --repo "$REPO" \
+              --base main \
+              --head develop \
+              --title "Promover develop → main (${{ needs.deploy-hml.outputs.version || 'ver Job Summary' }})" \
+              --body "PR automático aberto após deploy bem-sucedido em HML (commit ${{ github.sha }}). Merge manual, sem automação aqui.")
+            echo "PR criado: $NEW_URL"
+            echo "## PR develop → main criado" >> "$GITHUB_STEP_SUMMARY"
+            echo "$NEW_URL" >> "$GITHUB_STEP_SUMMARY"
+          fi
