@@ -1,0 +1,41 @@
+name: Build & Test (reusable)
+
+on:
+  workflow_call:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Instalar dependências
+        run: pip install -r requirements-dev.txt
+
+      - name: Rodar testes
+        run: pytest --junitxml=test-results/junit.xml
+
+      - name: Publicar relatório de testes (sempre, mesmo em falha)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results/
+          retention-days: 14
+
+      - name: Resumo dos testes que falharam (se houver)
+        if: failure()
+        run: |
+          echo "## ❌ Testes que falharam" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f test-results/junit.xml ]; then
+            grep -B 2 '<failure' test-results/junit.xml | grep -E 'classname=|<failure' | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Nenhum XML de resultado encontrado (falha antes dos testes rodarem — ver log do step acima)." >> "$GITHUB_STEP_SUMMARY"
+          fi

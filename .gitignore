@@ -1,0 +1,23 @@
+# Segredos
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+test-results/
+
+# IDE / SO
+.idea/
+.vscode/
+.DS_Store
+
+# Config local do Claude Code (regras de permissão pessoais, não compartilhadas)
+.claude/settings.local.json

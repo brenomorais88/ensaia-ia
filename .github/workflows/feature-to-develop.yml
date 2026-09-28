@@ -1,0 +1,49 @@
+name: Feature → Develop
+
+# Fluxo: push em feature/* abre (ou reaproveita) um PR pra develop, roda os testes.
+# O merge NÃO é automático — o job build-test é o status check que a branch
+# protection de `develop` exige pra liberar o botão "Merge" na tela do PR.
+
+on:
+  push:
+    branches:
+      - "feature/**"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  open-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Abrir PR pra develop (ou confirmar que já existe)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          BRANCH="${{ github.ref_name }}"
+          REPO="${{ github.repository }}"
+
+          EXISTING_URL=$(gh pr list --repo "$REPO" --head "$BRANCH" --base develop --json url -q '.[0].url' || true)
+
+          if [ -n "$EXISTING_URL" ]; then
+            echo "PR já existe: $EXISTING_URL"
+            echo "## PR já existente" >> "$GITHUB_STEP_SUMMARY"
+            echo "$EXISTING_URL" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Nenhum PR encontrado pra $BRANCH -> develop. Criando..."
+            NEW_URL=$(gh pr create \
+              --repo "$REPO" \
+              --base develop \
+              --head "$BRANCH" \
+              --title "$BRANCH" \
+              --body "PR automático aberto pelo workflow Feature → Develop.")
+            echo "PR criado: $NEW_URL"
+            echo "## PR criado" >> "$GITHUB_STEP_SUMMARY"
+            echo "$NEW_URL" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  build-test:
+    needs: open-pr
+    uses: ./.github/workflows/build-test.yml
