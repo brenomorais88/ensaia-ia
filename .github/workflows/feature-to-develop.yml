@@ -1,6 +1,6 @@
 name: Feature → Develop
 
-# Fluxo: push em feature/* abre (ou reaproveita) um PR pra develop, roda os testes.
+# Fluxo: push em feature/* ou fix/* abre (ou reaproveita) um PR pra develop, roda os testes.
 # O merge NÃO é automático — o job build-test é o status check que a branch
 # protection de `develop` exige pra liberar o botão "Merge" na tela do PR.
 
@@ -8,6 +8,7 @@ on:
   push:
     branches:
       - "feature/**"
+      - "fix/**"
 
 permissions:
   contents: read
