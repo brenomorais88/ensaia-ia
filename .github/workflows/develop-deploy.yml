@@ -2,10 +2,11 @@ name: Develop → Deploy HML → PR to main
 
 # Fluxo: push em develop (merge de PR aprovado) roda os testes; se passar, determina a
 # versão semântica (X.Y.Z) e builda/publica a imagem só se essa versão ainda não
-# existir no Docker Hub; faz deploy via SSH na MESMA EC2 de HML do backend (container
-# novo, rede Docker `ensaia-hml-net` compartilhada, sem acoplar dados/processo com os
-# outros containers — limites de memória/CPU explícitos); depois abre (ou reaproveita)
-# um PR de develop pra main.
+# existir no GitHub Container Registry (ghcr.io — privado e gratuito, sem o limite de
+# 1 repo privado do Docker Hub free); faz deploy via SSH na MESMA EC2 de HML do backend
+# (container novo, rede Docker `ensaia-hml-net` compartilhada, sem acoplar dados/processo
+# com os outros containers — limites de memória/CPU explícitos); depois abre (ou
+# reaproveita) um PR de develop pra main.
 
 on:
   push:
@@ -23,6 +24,9 @@ jobs:
   determine-version:
     needs: build-test
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: read
     outputs:
       version: ${{ steps.version.outputs.version }}
       image_exists: ${{ steps.check.outputs.exists }}
@@ -61,16 +65,17 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "## Versão: \`$VERSION\`" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Login no Docker Hub (só pra checar existência da imagem)
+      - name: Login no GHCR (só pra checar existência da imagem)
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Checar se a imagem dessa versão já existe no Docker Hub
+      - name: Checar se a imagem dessa versão já existe no GHCR
         id: check
         run: |
-          IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/ensaia-ia:${{ steps.version.outputs.version }}"
+          IMAGE="ghcr.io/${{ github.repository_owner }}/ensaia-ia:${{ steps.version.outputs.version }}"
           if docker manifest inspect "$IMAGE" > /dev/null 2>&1; then
             echo "Imagem $IMAGE já existe — não precisa buildar de novo."
             echo "exists=true" >> "$GITHUB_OUTPUT"
@@ -83,18 +88,21 @@ jobs:
     needs: determine-version
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      packages: write
     env:
-      IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/ensaia-ia
+      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/ensaia-ia
       VERSION: ${{ needs.determine-version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Login no Docker Hub
+      - name: Login no GHCR
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build e push da imagem (só se essa versão ainda não existir)
         if: needs.determine-version.outputs.image_exists != 'true'
@@ -106,7 +114,7 @@ jobs:
 
       - name: Pular build (imagem já existe — provável retry)
         if: needs.determine-version.outputs.image_exists == 'true'
-        run: echo "Imagem ${{ env.IMAGE_NAME }}:${{ env.VERSION }} já existe no Docker Hub — reaproveitando, sem rebuild."
+        run: echo "Imagem ${{ env.IMAGE_NAME }}:${{ env.VERSION }} já existe no GHCR — reaproveitando, sem rebuild."
 
       - name: Deploy via SSH na EC2 de HML (com health-check e logs em caso de erro)
         uses: appleboy/ssh-action@v1.0.3
@@ -119,8 +127,8 @@ jobs:
             set -euo pipefail
             IMAGE="${{ env.IMAGE_NAME }}:${{ env.VERSION }}"
 
-            echo "== Login no Docker Hub (repositório privado) =="
-            echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+            echo "== Login no GHCR (repositório privado) =="
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
             echo "== Pull da imagem =="
             docker pull "$IMAGE"
