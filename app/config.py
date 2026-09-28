@@ -10,7 +10,13 @@ import os
 
 APP_VERSION = "0.1.0"
 
-_REQUIRED: list[str] = ["OPENAI_API_KEY", "VEREDITO_SERVICE_TOKEN"]
+_REQUIRED: list[str] = [
+    "OPENAI_API_KEY",
+    "VEREDITO_SERVICE_TOKEN",
+    "VOICE_TOKEN_SECRET",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+]
 
 
 class ConfigError(RuntimeError):
@@ -31,6 +37,10 @@ class Settings:
         self.env = os.environ.get("ENV", "local")
         self.openai_api_key = os.environ["OPENAI_API_KEY"]
         self.veredito_service_token = os.environ["VEREDITO_SERVICE_TOKEN"]
+        self.voice_token_secret = os.environ["VOICE_TOKEN_SECRET"]
+        self.aws_access_key_id = os.environ["AWS_ACCESS_KEY_ID"]
+        self.aws_secret_access_key = os.environ["AWS_SECRET_ACCESS_KEY"]
+        self.aws_region = os.environ.get("AWS_REGION", "us-east-1")
 
 
 def load_settings() -> Settings:
